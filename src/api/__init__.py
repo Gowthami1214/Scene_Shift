@@ -1,0 +1,1 @@
+"""SceneShift FastAPI backend package."""

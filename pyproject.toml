@@ -1,0 +1,35 @@
+[tool.pytest.ini_options]
+testpaths = ["src/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--color=yes",
+]
+# To enable coverage reporting, install pytest-cov and run:
+#   pytest --cov=src --cov-report=term-missing --cov-fail-under=70
+asyncio_mode = "auto"
+markers = [
+    "gpu: marks tests that require a GPU (deselect with '-m not gpu')",
+    "slow: marks slow-running tests (deselect with '-m not slow')",
+    "integration: marks integration tests requiring model downloads",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "src/tests/*",
+    "src/*/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "pass",
+]

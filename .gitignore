@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local runtime output
+logs/
+outputs/
+*.log
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# Model weights and generated assets
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

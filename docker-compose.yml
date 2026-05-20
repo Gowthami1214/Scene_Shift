@@ -1,0 +1,61 @@
+version: "3.9"
+
+# ==============================================================================
+# SceneShift — Docker Compose
+# Orchestrates the Gradio UI + FastAPI backend with GPU support
+# ==============================================================================
+
+services:
+
+  sceneshift:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sceneshift:latest
+    container_name: sceneshift_app
+
+    # GPU support (requires NVIDIA Container Toolkit)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    ports:
+      - "7860:7860"   # Gradio UI
+      - "8000:8000"   # FastAPI backend
+
+    volumes:
+      # Persistent model cache (avoids re-downloading on restart)
+      - sceneshift_hf_cache:/app/.cache/huggingface
+      - sceneshift_torch_cache:/app/.cache/torch
+      # Output directory
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_HOME=/app/.cache/huggingface
+      - TORCH_HOME=/app/.cache/torch
+      - SCENESHIFT_FORCE_CPU=0
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    # Increase shared memory for PyTorch DataLoader workers
+    shm_size: "4gb"
+
+
+volumes:
+  sceneshift_hf_cache:
+    driver: local
+  sceneshift_torch_cache:
+    driver: local

@@ -1,0 +1,1 @@
+"""SceneShift processing pipeline package."""
