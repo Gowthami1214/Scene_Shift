@@ -12,15 +12,16 @@
 
 ## 🚀 Quick Start
 
-```bash
+```powershell
 # 1. Clone repository
 git clone <repository_url> sceneshift
 cd sceneshift
 
 # 2. Create Python environment
-python -m venv venv
-venv\Scripts\activate          # Windows
-# source venv/bin/activate     # Linux/macOS
+python -m venv .venv
+.venv\Scripts\Activate.ps1    # Windows PowerShell
+# .venv\Scripts\activate      # Windows CMD
+# source .venv/bin/activate    # Linux/macOS
 
 # 3. Install PyTorch with CUDA 12.1 (GPU)
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
@@ -37,6 +38,16 @@ python app.py
 
 Open **http://localhost:7860** in your browser.  
 FastAPI backend: **http://localhost:8000** | API Docs: **http://localhost:8000/docs**
+
+### 🖥️ Run using Docker Compose
+
+```powershell
+docker-compose up --build
+```
+
+Then open **http://localhost:7860**.
+
+> If `7860` or `8000` is already in use, stop the process using `netstat -ano | findstr ":7860"` or `netstat -ano | findstr ":8000"` and then `Stop-Process -Id <PID> -Force`.
 
 ---
 
@@ -355,5 +366,6 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 *Built with ❤️ using PyTorch, Hugging Face Diffusers, and OpenCV.*
-#   S c e n e _ S h i f t  
+#   S c e n e _ S h i f t 
+ 
  
