@@ -366,6 +366,3 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 *Built with ❤️ using PyTorch, Hugging Face Diffusers, and OpenCV.*
-#   S c e n e _ S h i f t 
- 
- 
