@@ -206,11 +206,44 @@ def feather_mask(
     return np.clip(alpha, 0.0, 1.0).astype(np.float32)
 
 
+# ── Trimap Generation ─────────────────────────────────────────────────────────
+
+def trimap_from_mask(
+    binary_mask: np.ndarray,
+    erosion_size: int = 10,
+    dilation_size: int = 20,
+) -> np.ndarray:
+    """Generate a trimap from a binary mask.
+
+    Args:
+        binary_mask: Binary mask (H x W, uint8, 0/255).
+        erosion_size: Pixels to erode for definite foreground.
+        dilation_size: Pixels to dilate for definite background boundary.
+
+    Returns:
+        Trimap (H x W, uint8): 0=background, 128=unknown, 255=foreground.
+    """
+    binary = (binary_mask > 127).astype(np.uint8)
+
+    kernel_e = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erosion_size * 2 + 1, erosion_size * 2 + 1))
+    kernel_d = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilation_size * 2 + 1, dilation_size * 2 + 1))
+
+    fg_definite = cv2.erode(binary, kernel_e, iterations=1)
+    bg_definite = 1 - cv2.dilate(binary, kernel_d, iterations=1)
+
+    trimap = np.full(binary_mask.shape[:2], 128, dtype=np.uint8)
+    trimap[fg_definite == 1] = 255
+    trimap[bg_definite == 1] = 0
+
+    return trimap
+
+
 # ── Main Pipeline ─────────────────────────────────────────────────────────────
 
 def refine_mask(
     raw_mask: np.ndarray,
     image_rgb: Optional[np.ndarray] = None,
+    alpha_matte: Optional[np.ndarray] = None,
     min_area: int = 500,
     morph_kernel: int = 5,
     feather_radius: int = 3,
@@ -240,8 +273,12 @@ def refine_mask(
         aligned = denoised
         edge_map = np.zeros(raw_mask.shape[:2], dtype=np.uint8)
 
-    # ── Stage 3: Hermite Feathering ────────────────────────────────────────────
-    alpha = feather_mask(aligned, feather_radius=feather_radius)
+    # ── Stage 3: Use BiRefNet alpha if available, otherwise feather ─────────────
+    if alpha_matte is not None:
+        logger.info("Using BiRefNet alpha matte for sub-pixel edges")
+        alpha = np.clip(alpha_matte, 0.0, 1.0).astype(np.float32)
+    else:
+        alpha = feather_mask(aligned, feather_radius=feather_radius)
 
     elapsed = time.perf_counter() - t0
     logger.info(f"Mask refinement completed in {elapsed:.3f}s")

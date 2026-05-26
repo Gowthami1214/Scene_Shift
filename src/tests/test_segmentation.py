@@ -104,6 +104,56 @@ class TestYOLOSegmentor(unittest.TestCase):
         self.assertGreater(result.confidence, 0.0)
         self.assertEqual(result.mask.shape, (h, w))
 
+    def test_segment_multiple_people_merged(self):
+        """When multiple people are detected, segment() should merge their masks and compute a combined bbox."""
+        import torch
+        h, w = 256, 256
+
+        # Build realistic tensor mocks for two people
+        masks_data = torch.zeros(2, h, w)
+        masks_data[0, 50:100, 50:100] = 0.9  # Person 1
+        masks_data[1, 150:200, 150:200] = 0.9  # Person 2
+
+        boxes_xyxy = torch.tensor([
+            [50.0, 50.0, 100.0, 100.0],
+            [150.0, 150.0, 200.0, 200.0]
+        ])
+        boxes_conf = torch.tensor([0.85, 0.95])
+        boxes_cls = torch.tensor([0.0, 0.0])
+
+        mock_boxes = MagicMock()
+        mock_boxes.xyxy = boxes_xyxy
+        mock_boxes.conf = boxes_conf
+        mock_boxes.cls = boxes_cls
+        mock_boxes.__len__ = lambda s: 2
+
+        mock_result = MagicMock()
+        mock_result.masks.data = masks_data
+        mock_result.boxes = mock_boxes
+        mock_result.names = {0: "person"}
+
+        mock_model_instance = MagicMock()
+        mock_model_instance.return_value = [mock_result]
+
+        seg = YOLOSegmentor()
+        seg._model = mock_model_instance
+
+        image = _make_rgb_image(h, w)
+        result = seg.segment(image)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.label, "person")
+        # Combined bbox should span from min of x1, y1 to max of x2, y2
+        self.assertEqual(result.bbox, (50, 50, 200, 200))
+        # Confidence should be mean of confidences
+        self.assertAlmostEqual(result.confidence, 0.90)
+
+        # Check mask union: pixels in Person 1 and Person 2 regions should be 255
+        self.assertEqual(result.mask[75, 75], 255)
+        self.assertEqual(result.mask[175, 175], 255)
+        # Background pixel should be 0
+        self.assertEqual(result.mask[120, 120], 0)
+
     def test_lazy_load_on_missing_model(self):
         """_load_model should set _model when ultralytics is importable."""
         seg = YOLOSegmentor()
@@ -165,6 +215,7 @@ class TestSegmentationEngine(unittest.TestCase):
         engine = SegmentationEngine()
         self.assertIsNotNone(engine._yolo)
         self.assertIsNotNone(engine._sam2)
+        self.assertIsNotNone(engine._matting)
 
     def test_interactive_fallback(self):
         """interactive_segment should work with SAM2 fallback."""
@@ -174,6 +225,38 @@ class TestSegmentationEngine(unittest.TestCase):
         result = engine.interactive_segment(image, [(64, 64)])
         self.assertIsNotNone(result)
         self.assertEqual(result.mode, "interactive")
+
+    def test_segment_with_matting_fallback(self):
+        """segment_with_matting should work with fallback mode."""
+        engine = SegmentationEngine()
+        engine._yolo._model = "fallback"  # Force fallback
+        engine._matting._model = "fallback"  # Force fallback
+        image = _make_rgb_image(128, 128)
+        result = engine.segment_with_matting(image)
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(result.alpha_matte)
+        self.assertEqual(result.alpha_matte.shape, (128, 128))
+
+
+class TestBiRefNetMatting(unittest.TestCase):
+    """Tests for the BiRefNetMatting module."""
+
+    def test_fallback_refine(self):
+        from src.models.segmentation import BiRefNetMatting
+        matting = BiRefNetMatting()
+        matting._model = "fallback"
+        image = _make_rgb_image(128, 128)
+        
+        # Test refine with no coarse mask
+        alpha = matting.refine(image)
+        self.assertEqual(alpha.shape, (128, 128))
+        self.assertTrue(np.all(alpha == 1.0))
+
+        # Test refine with coarse mask
+        coarse = _make_binary_mask(128, 128, radius=30)
+        alpha_coarse = matting.refine(image, coarse_mask=coarse)
+        self.assertEqual(alpha_coarse.shape, (128, 128))
+        self.assertTrue(np.allclose(alpha_coarse, coarse / 255.0))
 
 
 if __name__ == "__main__":

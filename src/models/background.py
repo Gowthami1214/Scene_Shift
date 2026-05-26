@@ -149,6 +149,15 @@ class BackgroundGenerator:
         Returns:
             BackgroundResult with the generated RGB image.
         """
+        # Enforce Diffusion safety guard layer
+        from src.pipeline.prompt_parser import parse_raw_background_prompt, BackgroundType
+        _, _, bg_type = parse_raw_background_prompt(prompt)
+        if bg_type != BackgroundType.GENERATED_SCENE:
+            raise RuntimeError(
+                f"Diffusion Safety Guard: Stable Diffusion background generation blocked "
+                f"for non-generative prompt: '{prompt}' (classified as {bg_type.name})"
+            )
+
         self._load_pipeline()
 
         if self._pipeline == "fallback":

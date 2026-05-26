@@ -554,18 +554,26 @@ input[type="checkbox"] {
 def make_progress_html(current_stage: str, pct: float, message: str) -> str:
     """Construct HTML markup for the custom progress bar and checklist."""
     stages = [
-        ("segmenting", "Segmenting"),
-        ("refining_mask", "Refining Mask"),
-        ("editing_object", "Editing Object"),
-        ("generating_background", "Generating Background"),
-        ("compositing", "Compositing"),
-        ("harmonizing", "Harmonizing"),
-        ("finalizing", "Finalizing"),
+        ("preprocessing", "Prep"),
+        ("removing_objects", "Removal"),
+        ("segmenting", "Segment"),
+        ("refining_mask", "Refine"),
+        ("preserving_identity", "Face Pres"),
+        ("editing_object", "Edit Subject"),
+        ("generating_background", "Gen BG"),
+        ("compositing", "Composite"),
+        ("harmonizing", "Harmonize"),
     ]
+
+    mapped_stage = current_stage
+    if current_stage == "adding_shadow":
+        mapped_stage = "compositing"
+    elif current_stage == "finalizing":
+        mapped_stage = "harmonizing"
 
     stage_idx = -1
     for i, (key, _) in enumerate(stages):
-        if key == current_stage:
+        if key == mapped_stage:
             stage_idx = i
             break
 
@@ -696,6 +704,29 @@ def build_ui() -> gr.Blocks:
 
                 seg_mode.change(toggle_click, seg_mode, [click_x, click_y])
 
+                gr.HTML('<div class="section-title" style="margin-top:1rem;">⚡ Quick Operations</div>')
+                unified_command = gr.Textbox(
+                    label="Unified AI Command",
+                    placeholder="e.g. remove backpack and make background white...",
+                    lines=2,
+                )
+                custom_bg_img = gr.Image(
+                    label="Upload Custom Background (Optional)",
+                    type="numpy",
+                    sources=["upload", "clipboard"],
+                    height=180,
+                    elem_classes=["image-container"],
+                )
+                with gr.Row():
+                    remove_id_card = gr.Checkbox(
+                        value=False,
+                        label="Remove ID Card & Lanyard (Shortcut)",
+                    )
+                    solid_bg = gr.Checkbox(
+                        value=False,
+                        label="Solid White BG (Shortcut)",
+                    )
+
                 gr.HTML('<div class="section-title" style="margin-top:1rem;">✨ Style & Prompts</div>')
                 style_preset = gr.Dropdown(
                     choices=STYLE_NAMES,
@@ -722,6 +753,19 @@ def build_ui() -> gr.Blocks:
 
                 gr.HTML('<div class="section-title" style="margin-top:1rem;">⚙️ Pipeline Settings</div>')
                 with gr.Accordion("Advanced Settings", open=False):
+                    output_res = gr.Dropdown(
+                        choices=["512", "768", "1024"],
+                        value="512",
+                        label="Output Resolution (px)",
+                    )
+                    enable_preproc = gr.Checkbox(
+                        value=True,
+                        label="Enable Preprocessing (Denoise & Exposure)",
+                    )
+                    enable_face_pres = gr.Checkbox(
+                        value=True,
+                        label="Enable Face Preservation (CodeFormer)",
+                    )
                     strength = gr.Slider(0.3, 1.0, value=0.65, step=0.05, label="Inpainting Strength")
                     guidance = gr.Slider(1.0, 20.0, value=7.5, step=0.5, label="Guidance Scale")
                     steps = gr.Slider(10, 100, value=30, step=5, label="Inference Steps")
@@ -828,6 +872,8 @@ def build_ui() -> gr.Blocks:
             img, obj_p, bg_p, style, blend, seg, s, g, n,
             en_sh, sh_op, sh_bl, sh_x, sh_y, en_ha, use_sd,
             sd_val, cx, cy,
+            rm_id, solid_b, out_res, en_prep, en_face,
+            unified_cmd, custom_bg,
         ):
             if img is None:
                 yield None, None, "⚠️ Please upload an image first.", gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
@@ -851,10 +897,13 @@ def build_ui() -> gr.Blocks:
             q = queue.Queue()
 
             stage_to_progress = {
-                "segmenting": 0.12,
-                "refining_mask": 0.22,
-                "editing_object": 0.48,
-                "generating_background": 0.70,
+                "preprocessing": 0.04,
+                "removing_objects": 0.10,
+                "segmenting": 0.18,
+                "refining_mask": 0.28,
+                "preserving_identity": 0.35,
+                "editing_object": 0.55,
+                "generating_background": 0.72,
                 "compositing": 0.82,
                 "adding_shadow": 0.88,
                 "harmonizing": 0.94,
@@ -869,6 +918,10 @@ def build_ui() -> gr.Blocks:
 
             def worker():
                 try:
+                    remove_list = ["id card", "lanyard", "badge"] if rm_id else []
+                    res_val = int(out_res)
+                    output_size = (res_val, res_val)
+
                     req = PipelineRequest(
                         image=img,
                         object_prompt=obj_p,
@@ -887,7 +940,14 @@ def build_ui() -> gr.Blocks:
                         enable_harmonization=en_ha,
                         use_sd_background=use_sd,
                         seed=seed,
-                        output_size=(512, 512),
+                        output_size=output_size,
+                        enable_preprocessing=en_prep,
+                        enable_face_preservation=en_face,
+                        enable_matting=True,
+                        remove_objects=remove_list,
+                        solid_background=solid_b,
+                        command=unified_cmd.strip() if unified_cmd else None,
+                        custom_background=custom_bg,
                     )
                     pipeline = get_pipeline()
                     res = pipeline.run(req, progress_callback=progress_callback)
@@ -953,6 +1013,8 @@ def build_ui() -> gr.Blocks:
                 enable_shadow, shadow_opacity, shadow_blur, shadow_x, shadow_y,
                 enable_harm, use_sd_bg, seed,
                 click_x, click_y,
+                remove_id_card, solid_bg, output_res, enable_preproc, enable_face_pres,
+                unified_command, custom_bg_img,
             ],
             outputs=[result_image, after_img, status_md, download_btn, progress_display, download_file],
             show_progress=False,  # Use custom progress HTML overlay instead
@@ -965,11 +1027,12 @@ def build_ui() -> gr.Blocks:
                 gr.update(value=None, visible=False),
                 gr.update(value="", visible=False),
                 gr.update(value=None, visible=False),
+                "", None,
             )
 
         clear_btn.click(
             fn=on_clear,
-            outputs=[input_image, result_image, before_img, after_img, status_md, download_btn, progress_display, download_file],
+            outputs=[input_image, result_image, before_img, after_img, status_md, download_btn, progress_display, download_file, unified_command, custom_bg_img],
         )
 
         # ── Footer ─────────────────────────────────────────────────────────────

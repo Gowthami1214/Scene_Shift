@@ -242,6 +242,9 @@ class TestOrchestratorMocked(unittest.TestCase):
             enable_shadow=True,
             enable_harmonization=True,
             use_sd_background=False,  # Use procedural
+            enable_preprocessing=False,
+            enable_face_preservation=False,
+            enable_matting=False,
         )
 
         progress_events = []
@@ -256,6 +259,409 @@ class TestOrchestratorMocked(unittest.TestCase):
         self.assertGreater(result.total_time_s, 0.0)
         self.assertGreater(len(progress_events), 0, "Progress callback should be called.")
         self.assertIn("segmentation", result.timings)
+
+    @patch("src.pipeline.orchestrator.SegmentationEngine")
+    @patch("src.pipeline.orchestrator.ObjectEditor")
+    @patch("src.pipeline.orchestrator.BackgroundGenerator")
+    def test_pipeline_completes_with_all_stages(
+        self,
+        MockBG,
+        MockEditor,
+        MockSeg,
+    ):
+        """Full pipeline with preprocessing, face preservation, and matting should complete."""
+        h, w = 512, 512
+        dummy_image = _make_image(h, w)
+        dummy_mask = _make_mask(h, w, 100)
+
+        # Mock segmentation
+        from src.models.segmentation import SegmentationResult
+        mock_seg = MockSeg.return_value
+        mock_seg.segment_with_matting.return_value = SegmentationResult(
+            mask=dummy_mask,
+            bbox=(50, 50, 450, 450),
+            label="person",
+            confidence=0.95,
+            mode="auto+matting",
+            inference_time_s=0.1,
+            alpha_matte=(dummy_mask / 255.0).astype(np.float32),
+        )
+
+        # Mock object editor
+        from src.models.editing import EditingResult
+        mock_editor = MockEditor.return_value
+        mock_editor.edit.return_value = EditingResult(
+            edited_image=dummy_image,
+            edited_crop=dummy_image[50:450, 50:450],
+            prompt_used="test prompt",
+            style_preset="Realistic",
+            inference_time_s=2.5,
+        )
+
+        # Mock background generator
+        from src.models.background import BackgroundResult
+        mock_bg = MockBG.return_value
+        mock_bg.generate.return_value = BackgroundResult(
+            image=dummy_image,
+            method="procedural",
+            prompt_used="test bg",
+            inference_time_s=0.1,
+        )
+
+        orch = PipelineOrchestrator()
+        orch._segmentation = mock_seg
+        orch._editor = mock_editor
+        orch._bg_gen = mock_bg
+
+        # Mock face protector to return dummy face region
+        from src.pipeline.face_preservation import FaceRegion, FacePreservationResult
+        orch._face_protector.detect_faces = MagicMock(return_value=[
+            FaceRegion(bbox=(150, 150, 350, 350), confidence=0.95, center=(250, 250), area=40000)
+        ])
+
+        image = _make_image(h, w)
+        req = PipelineRequest(
+            image=image,
+            object_prompt="a person",
+            background_prompt="green field",
+            style_preset="Realistic",
+            blend_mode="alpha",
+            num_steps=5,
+            enable_shadow=True,
+            enable_harmonization=True,
+            use_sd_background=False,
+            enable_preprocessing=True,
+            enable_face_preservation=True,
+            enable_matting=True,
+        )
+
+        result = orch.run(req, job_id="test_job_full")
+
+        self.assertIsInstance(result, PipelineResult)
+        self.assertIsNotNone(result.final_image)
+        self.assertEqual(result.final_image.shape[2], 3)
+        self.assertIn("preprocessing", result.timings)
+        self.assertIn("face_detection", result.timings)
+        self.assertIn("face_restoration", result.timings)
+
+    @patch("src.pipeline.orchestrator.SegmentationEngine")
+    @patch("src.pipeline.orchestrator.ObjectEditor")
+    @patch("src.pipeline.orchestrator.BackgroundGenerator")
+    @patch("src.pipeline.orchestrator.ObjectRemovalPipeline")
+    def test_pipeline_with_object_removal(
+        self,
+        MockRemoval,
+        MockBG,
+        MockEditor,
+        MockSeg,
+    ):
+        """Pipeline with object removal enabled should call the removal pipeline and complete."""
+        h, w = 64, 64
+        dummy_image = _make_image(h, w)
+        dummy_mask = _make_mask(h, w, 20)
+
+        # Mock removal
+        from src.pipeline.object_removal import ObjectRemovalResult
+        mock_removal = MockRemoval.return_value
+        mock_removal.remove.return_value = ObjectRemovalResult(
+            image=dummy_image,
+            object_mask=dummy_mask,
+            detected_boxes=[(10, 10, 30, 30)],
+            removal_time_s=0.1,
+        )
+
+        # Mock segmentation
+        from src.models.segmentation import SegmentationResult
+        mock_seg = MockSeg.return_value
+        mock_seg.segment_with_matting.return_value = SegmentationResult(
+            mask=dummy_mask,
+            bbox=(10, 10, 50, 50),
+            label="person",
+            confidence=0.95,
+            mode="auto+matting",
+            inference_time_s=0.1,
+            alpha_matte=(dummy_mask / 255.0).astype(np.float32),
+        )
+
+        # Mock object editor
+        from src.models.editing import EditingResult
+        mock_editor = MockEditor.return_value
+        mock_editor.edit.return_value = EditingResult(
+            edited_image=dummy_image,
+            edited_crop=dummy_image[10:50, 10:50],
+            prompt_used="test prompt",
+            style_preset="Realistic",
+            inference_time_s=2.5,
+        )
+
+        # Mock background generator
+        from src.models.background import BackgroundResult
+        mock_bg = MockBG.return_value
+        mock_bg.generate.return_value = BackgroundResult(
+            image=dummy_image,
+            method="procedural",
+            prompt_used="test bg",
+            inference_time_s=0.1,
+        )
+
+        orch = PipelineOrchestrator()
+        orch._segmentation = mock_seg
+        orch._editor = mock_editor
+        orch._bg_gen = mock_bg
+        orch._object_remover = mock_removal
+
+        image = _make_image(h, w)
+        req = PipelineRequest(
+            image=image,
+            object_prompt="",  # Skip SD editing
+            background_prompt="transparent",
+            solid_background=True,
+            remove_objects=["id card", "lanyard"],
+            enable_preprocessing=False,
+            enable_face_preservation=False,
+            enable_matting=True,
+        )
+
+        result = orch.run(req, job_id="test_job_removal")
+
+        self.assertIsInstance(result, PipelineResult)
+        self.assertIsNotNone(result.final_image)
+        self.assertIn("object_removal", result.timings)
+        mock_removal.remove.assert_called_once()
+
+    @patch("src.pipeline.orchestrator.SegmentationEngine")
+    @patch("src.pipeline.orchestrator.ObjectEditor")
+    @patch("src.pipeline.orchestrator.BackgroundGenerator")
+    def test_pipeline_with_solid_color_background(
+        self,
+        MockBG,
+        MockEditor,
+        MockSeg,
+    ):
+        """Pipeline with a custom solid color background should create the correct background color and composite."""
+        h, w = 64, 64
+        dummy_image = _make_image(h, w)
+        dummy_mask = _make_mask(h, w, 20)
+
+        # Mock segmentation
+        from src.models.segmentation import SegmentationResult
+        mock_seg = MockSeg.return_value
+        mock_seg.segment_with_matting.return_value = SegmentationResult(
+            mask=dummy_mask,
+            bbox=(10, 10, 50, 50),
+            label="person",
+            confidence=0.95,
+            mode="auto+matting",
+            inference_time_s=0.1,
+            alpha_matte=(dummy_mask / 255.0).astype(np.float32),
+        )
+
+        # Mock object editor
+        from src.models.editing import EditingResult
+        mock_editor = MockEditor.return_value
+        mock_editor.edit.return_value = EditingResult(
+            edited_image=dummy_image,
+            edited_crop=dummy_image[10:50, 10:50],
+            prompt_used="",
+            style_preset="Realistic",
+            inference_time_s=0.0,
+        )
+
+        orch = PipelineOrchestrator()
+        orch._segmentation = mock_seg
+        orch._editor = mock_editor
+
+        image = _make_image(h, w)
+        req = PipelineRequest(
+            image=image,
+            object_prompt="",  # Skip SD editing
+            background_prompt="color:#0000FF",  # Solid blue
+            solid_background=True,
+            enable_preprocessing=False,
+            enable_face_preservation=False,
+            enable_matting=True,
+            enable_shadow=False,  # Skip shadow
+            enable_harmonization=False,  # Skip harmonization
+        )
+
+        result = orch.run(req, job_id="test_job_solid_blue")
+
+        self.assertIsInstance(result, PipelineResult)
+        self.assertIsNotNone(result.final_image)
+        self.assertIsNotNone(result.execution_plan)
+        self.assertFalse(result.execution_plan.use_diffusion)
+        
+        # Verify background intermediate is exactly solid blue [0, 0, 255]
+        bg_intermediate = result.intermediate.get("background")
+        self.assertIsNotNone(bg_intermediate)
+        np.testing.assert_array_equal(bg_intermediate[0, 0], [0, 0, 255])
+
+    @patch("src.pipeline.orchestrator.SegmentationEngine")
+    @patch("src.pipeline.orchestrator.ObjectEditor")
+    @patch("src.pipeline.orchestrator.BackgroundGenerator")
+    def test_pipeline_direct_api_routing_with_planner(
+        self,
+        MockBG,
+        MockEditor,
+        MockSeg,
+    ):
+        """When direct API fields are supplied without command, the orchestrator should still run the planner."""
+        h, w = 64, 64
+        dummy_image = _make_image(h, w)
+        dummy_mask = _make_mask(h, w, 20)
+
+        # Mock segmentation
+        from src.models.segmentation import SegmentationResult
+        mock_seg = MockSeg.return_value
+        mock_seg.segment_with_matting.return_value = SegmentationResult(
+            mask=dummy_mask,
+            bbox=(10, 10, 50, 50),
+            label="person",
+            confidence=0.95,
+            mode="auto+matting",
+            inference_time_s=0.1,
+            alpha_matte=(dummy_mask / 255.0).astype(np.float32),
+        )
+
+        # Mock object editor
+        from src.models.editing import EditingResult
+        mock_editor = MockEditor.return_value
+        mock_editor.edit.return_value = EditingResult(
+            edited_image=dummy_image,
+            edited_crop=dummy_image[10:50, 10:50],
+            prompt_used="",
+            style_preset="Realistic",
+            inference_time_s=0.0,
+        )
+
+        orch = PipelineOrchestrator()
+        orch._segmentation = mock_seg
+        orch._editor = mock_editor
+
+        image = _make_image(h, w)
+        req = PipelineRequest(
+            image=image,
+            object_prompt="",  # Skip SD editing
+            background_prompt="blue",  # Isolated background color
+            solid_background=False,    # Initially False, planner should set it to True
+            use_sd_background=True,    # Initially True, planner should set it to False
+            enable_preprocessing=False,
+            enable_face_preservation=False,
+            enable_matting=True,
+            enable_shadow=False,
+            enable_harmonization=False,
+        )
+
+        result = orch.run(req, job_id="test_job_direct_routing")
+
+        self.assertIsInstance(result, PipelineResult)
+        self.assertIsNotNone(result.execution_plan)
+        self.assertFalse(result.execution_plan.use_diffusion)
+        self.assertTrue(result.execution_plan.use_color_compositing)
+        # Check that request/plan overrides were correctly applied by orchestrator
+        self.assertTrue(req.solid_background)
+        self.assertFalse(req.use_sd_background)
+        self.assertEqual(req.background_prompt, "color:#0000FF")
+
+        # Verify background intermediate is exactly solid blue [0, 0, 255]
+        bg_intermediate = result.intermediate.get("background")
+        self.assertIsNotNone(bg_intermediate)
+        np.testing.assert_array_equal(bg_intermediate[0, 0], [0, 0, 255])
+
+    @patch("src.pipeline.orchestrator.SegmentationEngine")
+    @patch("src.pipeline.orchestrator.ObjectEditor")
+    @patch("src.pipeline.orchestrator.BackgroundGenerator")
+    def test_pipeline_multi_person_execution_plan(
+        self,
+        MockBG,
+        MockEditor,
+        MockSeg,
+    ):
+        """Verify that the execution plan correctly flags preserve_all_people for background change and person removal."""
+        h, w = 64, 64
+        dummy_image = _make_image(h, w)
+        dummy_mask = _make_mask(h, w, 20)
+
+        # Mock segmentation
+        from src.models.segmentation import SegmentationResult
+        mock_seg = MockSeg.return_value
+        mock_seg.segment_with_matting.return_value = SegmentationResult(
+            mask=dummy_mask,
+            bbox=(10, 10, 50, 50),
+            label="person",
+            confidence=0.95,
+            mode="auto+matting",
+            inference_time_s=0.1,
+            alpha_matte=(dummy_mask / 255.0).astype(np.float32),
+        )
+
+        # Mock object editor
+        from src.models.editing import EditingResult
+        mock_editor = MockEditor.return_value
+        mock_editor.edit.return_value = EditingResult(
+            edited_image=dummy_image,
+            edited_crop=dummy_image[10:50, 10:50],
+            prompt_used="",
+            style_preset="Realistic",
+            inference_time_s=0.0,
+        )
+
+        # Mock background generator
+        from src.models.background import BackgroundResult
+        mock_bg = MockBG.return_value
+        mock_bg.generate.return_value = BackgroundResult(
+            image=dummy_image,
+            method="procedural",
+            prompt_used="test bg",
+            inference_time_s=0.1,
+        )
+
+        orch = PipelineOrchestrator()
+        orch._segmentation = mock_seg
+        orch._editor = mock_editor
+        orch._bg_gen = mock_bg
+
+        image = _make_image(h, w)
+
+        # Test case 1: preserve all people on background change
+        req1 = PipelineRequest(
+            image=image,
+            command="change background to white",
+            enable_preprocessing=False,
+            enable_face_preservation=False,
+            enable_matting=True,
+            enable_shadow=False,
+            enable_harmonization=False,
+        )
+        result1 = orch.run(req1, job_id="test_multi_person_preserve")
+        self.assertIsNotNone(result1.execution_plan)
+        self.assertTrue(result1.execution_plan.preserve_all_people)
+        self.assertFalse(result1.execution_plan.remove_people)
+
+        # Test case 2: remove person
+        req2 = PipelineRequest(
+            image=image,
+            command="remove person on left",
+            enable_preprocessing=False,
+            enable_face_preservation=False,
+            enable_matting=True,
+            enable_shadow=False,
+            enable_harmonization=False,
+        )
+        # Mock object removal to prevent actual run errors
+        orch._object_remover = MagicMock()
+        from src.pipeline.object_removal import ObjectRemovalResult
+        orch._object_remover.remove.return_value = ObjectRemovalResult(
+            image=dummy_image,
+            object_mask=dummy_mask,
+            detected_boxes=[(10, 10, 30, 30)],
+            removal_time_s=0.1,
+        )
+
+        result2 = orch.run(req2, job_id="test_multi_person_remove")
+        self.assertIsNotNone(result2.execution_plan)
+        self.assertFalse(result2.execution_plan.preserve_all_people)
+        self.assertTrue(result2.execution_plan.remove_people)
 
 
 if __name__ == "__main__":

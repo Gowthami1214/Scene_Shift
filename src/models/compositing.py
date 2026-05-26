@@ -19,8 +19,6 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 from loguru import logger
-from scipy.sparse import lil_matrix
-from scipy.sparse.linalg import spsolve
 
 
 # ── Blend Mode Enum ────────────────────────────────────────────────────────────
@@ -126,7 +124,7 @@ def poisson_blend(
             background.astype(np.uint8),
             mask_8u,
             center,
-            cv2.MIXED_CLONE,
+            cv2.NORMAL_CLONE,
         )
         core_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
         mask_binary = (mask_8u > 127).astype(np.uint8)

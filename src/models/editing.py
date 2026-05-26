@@ -296,6 +296,19 @@ class ObjectEditor:
         Returns:
             EditingResult with the full edited image.
         """
+        # Enforce Diffusion safety guard layer
+        prompt_lower = object_prompt.lower().strip()
+        is_removal = (
+            not prompt_lower
+            or prompt_lower in ("none", "object")
+            or any(w in prompt_lower for w in ("remove", "delete", "erase", "eliminate", "clear"))
+        )
+        if is_removal:
+            raise RuntimeError(
+                f"Diffusion Safety Guard: Stable Diffusion object inpainting blocked "
+                f"for simple object removal/empty prompt: '{object_prompt}'"
+            )
+
         self._load_pipeline()
 
         positive, negative = self._build_prompt(

@@ -50,8 +50,10 @@ from src.pipeline.orchestrator import (
     PipelineRequest,
     ProgressEvent,
 )
+from src.pipeline.prompt_parser import parse_prompt
+from src.pipeline.execution_planner import build_execution_plan, BackgroundStrategy
 from src.utils.device import get_device_info
-from src.utils.image_io import pil_to_numpy, save_image, temp_output_path
+from src.utils.image_io import pil_to_numpy, save_image, temp_output_path, base64_to_image
 from src.utils.validators import (
     ValidationError,
     validate_blend_mode,
@@ -130,6 +132,15 @@ class ProcessRequest(BaseModel):
     enable_harmonization: bool = True
     use_sd_background: bool = True
     seed: Optional[int] = None
+    enable_preprocessing: bool = True
+    enable_face_preservation: bool = True
+    enable_matting: bool = True
+    remove_objects: List[str] = Field(default_factory=list)
+    solid_background: bool = False
+    output_width: int = Field(default=512, ge=256, le=2048)
+    output_height: int = Field(default=512, ge=256, le=2048)
+    command: Optional[str] = Field(default=None, max_length=1000)
+    custom_background_base64: Optional[str] = None
 
 
 class JobStatus(BaseModel):
@@ -141,6 +152,16 @@ class JobStatus(BaseModel):
     elapsed_s: float = 0.0
     result_path: Optional[str] = None
     error: Optional[str] = None
+
+
+class ParsePreviewRequest(BaseModel):
+    """Request body for the /api/parse-preview dry-run endpoint."""
+    command: str = Field(..., min_length=1, max_length=2000,
+                         description="Natural language editing instruction to parse.")
+    use_sd_background: bool = Field(default=True,
+                                    description="Whether SD background generation is globally enabled.")
+    current_style_preset: str = Field(default="Realistic",
+                                      description="Fallback style preset used if none found in the prompt.")
 
 
 # ── Health & info endpoints ────────────────────────────────────────────────────
@@ -155,6 +176,89 @@ async def health_check():
 async def device_info():
     """Return compute device information."""
     return get_device_info()
+
+
+# ── Parse preview endpoint ──────────────────────────────────────────────────────────
+
+@app.post("/api/parse-preview", tags=["System"])
+async def parse_preview(req: ParsePreviewRequest) -> JSONResponse:
+    """
+    Dry-run semantic parse endpoint.
+
+    Parses a natural language editing command through both:
+      - Layer 1: Semantic Intent Parser  → ParsedIntent
+      - Layer 2: Execution Planner       → ExecutionPlan
+
+    Returns both structures as JSON without running the pipeline.
+    Useful for UI previewing and debugging what the system understood.
+
+    Example request:
+        POST /api/parse-preview
+        {"command": "remove tissues and change background to blue"}
+
+    Example response:
+        {
+          "intent": {
+            "remove_targets": ["tissues"],
+            "background_color": "#0000FF",
+            "style_descriptors": [],
+            "confidence": 0.88
+          },
+          "plan": {
+            "background_strategy": "color_fill",
+            "sd_generation_approved": false,
+            "reasoning": [...]
+          }
+        }
+    """
+    try:
+        # Layer 1: NLP parsing
+        intent = parse_prompt(req.command)
+
+        # Layer 2: Execution planning (no custom background in dry-run)
+        plan = build_execution_plan(
+            intent,
+            has_custom_background=False,
+            use_sd_background=req.use_sd_background,
+            current_style_preset=req.current_style_preset,
+        )
+
+        return JSONResponse(content={
+            "command": req.command,
+            "intent": {
+                "remove_targets":       intent.remove_targets,
+                "replace_targets":      intent.replace_targets,
+                "background_request":   intent.background_request,
+                "background_color":     intent.background_color,
+                "style_descriptors":    intent.style_descriptors,
+                "preserve_identity":    intent.preserve_identity,
+                "preserve_foreground":  intent.preserve_foreground,
+                "transparency_requested": intent.transparency_requested,
+                "parse_confidence":     intent.parse_confidence,
+            },
+            "plan": {
+                "run_object_removal":      plan.run_object_removal,
+                "removal_targets":         plan.removal_targets,
+                "foreground_strategy":     plan.foreground_strategy,
+                "run_segmentation":        plan.run_segmentation,
+                "segmentation_strategy":   plan.segmentation_strategy,
+                "background_strategy":     plan.background_strategy,
+                "background_color_hex":    plan.background_color_hex,
+                "background_scene_prompt": plan.background_scene_prompt,
+                "enable_face_preservation": plan.enable_face_preservation,
+                "enable_shadow":           plan.enable_shadow,
+                "enable_harmonization":    plan.enable_harmonization,
+                "style_preset":            plan.style_preset,
+                "style_enrichment":        plan.style_enrichment,
+                "sd_generation_approved":  plan.sd_generation_approved,
+                "sd_inpainting_approved":  plan.sd_inpainting_approved,
+                "reasoning":               plan.reasoning,
+            },
+        })
+
+    except Exception as exc:
+        logger.error(f"Parse preview error: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Parse error: {exc}")
 
 
 # ── Upload endpoint ────────────────────────────────────────────────────────────
@@ -256,6 +360,14 @@ async def _run_pipeline(job_id: str, req: ProcessRequest) -> None:
         except ValidationError as exc:
             raise ValueError(str(exc))
 
+        custom_bg_np = None
+        if req.custom_background_base64:
+            try:
+                bg_pil = base64_to_image(req.custom_background_base64)
+                custom_bg_np = pil_to_numpy(bg_pil)
+            except Exception as exc:
+                logger.warning(f"Failed to decode custom background base64 ({exc}); skipping custom background.")
+
         pipeline_req = PipelineRequest(
             image=image_np,
             object_prompt=obj_prompt,
@@ -274,7 +386,14 @@ async def _run_pipeline(job_id: str, req: ProcessRequest) -> None:
             enable_harmonization=req.enable_harmonization,
             use_sd_background=req.use_sd_background,
             seed=req.seed,
-            output_size=(512, 512),
+            output_size=(req.output_width, req.output_height),
+            enable_preprocessing=req.enable_preprocessing,
+            enable_face_preservation=req.enable_face_preservation,
+            enable_matting=req.enable_matting,
+            remove_objects=req.remove_objects,
+            solid_background=req.solid_background,
+            command=req.command,
+            custom_background=custom_bg_np,
         )
 
         orchestrator = get_orchestrator()

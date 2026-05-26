@@ -209,6 +209,23 @@ class TestProcessEndpoint(unittest.TestCase):
         )
         self.job_id = resp.json()["job_id"]
 
+        # Mock orchestrator to prevent running actual ML models
+        self.orchestrator_patcher = patch("src.api.server.get_orchestrator")
+        self.mock_get_orchestrator = self.orchestrator_patcher.start()
+        self.mock_orchestrator = MagicMock()
+        self.mock_orchestrator.run_async = AsyncMock()
+        
+        # Mock the run_async to return a dummy PipelineResult
+        from src.pipeline.orchestrator import PipelineResult
+        self.mock_orchestrator.run_async.return_value = PipelineResult(
+            job_id=self.job_id,
+            final_image=np.zeros((128, 128, 3), dtype=np.uint8),
+            timings={"total": 0.1},
+            total_time_s=0.1,
+            output_path="dummy_path.png",
+        )
+        self.mock_get_orchestrator.return_value = self.mock_orchestrator
+
     def test_process_unknown_job_returns_404(self):
         resp = self.client.post(
             "/api/process",
@@ -233,6 +250,7 @@ class TestProcessEndpoint(unittest.TestCase):
         self.assertIn(data["status"], ["queued", "processing"])
 
     def tearDown(self):
+        self.orchestrator_patcher.stop()
         _jobs.pop(self.job_id, None)
 
 

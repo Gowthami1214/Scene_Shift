@@ -236,3 +236,27 @@ def temp_output_path(job_id: str, suffix: str = ".png", stage: str = "result") -
     out_dir = Path("outputs") / job_id
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir / f"{stage}{suffix}"
+
+
+def upscale_to_original(
+    image: np.ndarray,
+    original_size: Tuple[int, int],
+    interpolation: int = cv2.INTER_LANCZOS4,
+) -> np.ndarray:
+    """
+    Upscale processed image back to the original size (width, height).
+
+    Args:
+        image: Processed RGB/grayscale NumPy array.
+        original_size: (width, height) of the original image.
+        interpolation: OpenCV interpolation flag.
+
+    Returns:
+        Upscaled image array.
+    """
+    orig_w, orig_h = original_size
+    h, w = image.shape[:2]
+    if (w, h) == (orig_w, orig_h):
+        return image
+    return cv2.resize(image, (orig_w, orig_h), interpolation=interpolation)
+
